@@ -75,7 +75,7 @@ lnewproto(lua_State *L) {
 
 static int
 ldeleteproto(lua_State *L) {
-	struct sproto * sp = lua_touserdata(L,1);
+	struct sproto * sp = (struct sproto*)lua_touserdata(L,1);
 	if (sp == NULL) {
 		return luaL_argerror(L, 1, "Need a sproto object");
 	}
@@ -86,7 +86,7 @@ ldeleteproto(lua_State *L) {
 static int
 lquerytype(lua_State *L) {
 	const char * type_name;
-	struct sproto *sp = lua_touserdata(L,1);
+	struct sproto *sp = (struct sproto*)lua_touserdata(L,1);
 	struct sproto_type *st;
 	if (sp == NULL) {
 		return luaL_argerror(L, 1, "Need a sproto object");
@@ -112,7 +112,7 @@ struct encode_ud {
 
 static int
 encode(const struct sproto_arg *args) {
-	struct encode_ud *self = args->ud;
+	struct encode_ud *self = (struct encode_ud*)args->ud;
 	lua_State *L = self->L;
 	if (self->deep >= ENCODE_DEEPLEVEL)
 		return luaL_error(L, "The table is too deep");
@@ -166,10 +166,16 @@ encode(const struct sproto_arg *args) {
 		lua_Integer v;
 		lua_Integer vh;
 		int isnum;
-		v = lua_tointegerx(L, -1, &isnum);
-		if(!isnum) {
-			return luaL_error(L, ".%s[%d] is not an integer (Is a %s)", 
-				args->tagname, args->index, lua_typename(L, lua_type(L, -1)));
+		if (args->decimal) {
+			// It's decimal.
+			lua_Number vn = lua_tonumber(L, -1);
+			v = (lua_Integer)(vn * args->decimal + 0.5);
+		} else {
+			v = lua_tointegerx(L, -1, &isnum);
+			if(!isnum) {
+				return luaL_error(L, ".%s[%d] is not an integer (Is a %s)", 
+					args->tagname, args->index, lua_typename(L, lua_type(L, -1)));
+			}
 		}
 		lua_pop(L,1);
 		// notice: in lua 5.2, lua_Integer maybe 52bit
@@ -265,7 +271,7 @@ lencode(lua_State *L) {
 	void * buffer = lua_touserdata(L, lua_upvalueindex(1));
 	int sz = lua_tointeger(L, lua_upvalueindex(2));
 	int tbl_index = 2;
-	struct sproto_type * st = lua_touserdata(L, 1);
+	struct sproto_type * st = (struct sproto_type*)lua_touserdata(L, 1);
 	if (st == NULL) {
 		return luaL_argerror(L, 1, "Need a sproto_type object");
 	}
@@ -289,7 +295,7 @@ lencode(lua_State *L) {
 			buffer = expand_buffer(L, sz, sz*2);
 			sz *= 2;
 		} else {
-			lua_pushlstring(L, buffer, r);
+			lua_pushlstring(L, (const char*)buffer, r);
 			return 1;
 		}
 	}
@@ -307,7 +313,7 @@ struct decode_ud {
 
 static int
 decode(const struct sproto_arg *args) {
-	struct decode_ud * self = args->ud;
+	struct decode_ud * self = (struct decode_ud*)args->ud;
 	lua_State *L = self->L;
 	if (self->deep >= ENCODE_DEEPLEVEL)
 		return luaL_error(L, "The table is too deep");
@@ -332,8 +338,15 @@ decode(const struct sproto_arg *args) {
 	switch (args->type) {
 	case SPROTO_TINTEGER: {
 		// notice: in lua 5.2, 52bit integer support (not 64)
-		lua_Integer v = *(uint64_t*)args->value;
-		lua_pushinteger(L, v);
+		if (args->decimal) {
+			lua_Integer v = *(uint64_t*)args->value;
+			lua_Number vn = (lua_Number)v;
+			vn /= args->decimal;
+			lua_pushnumber(L, vn);
+		} else {
+			lua_Integer v = *(uint64_t*)args->value;
+			lua_pushinteger(L, v);
+		}
 		break;
 	}
 	case SPROTO_TBOOLEAN: {
@@ -342,7 +355,7 @@ decode(const struct sproto_arg *args) {
 		break;
 	}
 	case SPROTO_TSTRING: {
-		lua_pushlstring(L, args->value, args->length);
+		lua_pushlstring(L, (const char*)args->value, args->length);
 		break;
 	}
 	case SPROTO_TSTRUCT: {
@@ -427,7 +440,7 @@ getbuffer(lua_State *L, int index, size_t *sz) {
  */
 static int
 ldecode(lua_State *L) {
-	struct sproto_type * st = lua_touserdata(L, 1);
+	struct sproto_type * st = (struct sproto_type*)lua_touserdata(L, 1);
 	const void * buffer;
 	struct decode_ud self;
 	size_t sz;
@@ -459,7 +472,7 @@ ldecode(lua_State *L) {
 
 static int
 ldumpproto(lua_State *L) {
-	struct sproto * sp = lua_touserdata(L, 1);
+	struct sproto * sp = (struct sproto*)lua_touserdata(L, 1);
 	if (sp == NULL) {
 		return luaL_argerror(L, 1, "Need a sproto_type object");
 	}
@@ -489,7 +502,7 @@ lpack(lua_State *L) {
 	if (bytes > maxsz) {
 		return luaL_error(L, "packing error, return size = %d", bytes);
 	}
-	lua_pushlstring(L, output, bytes);
+	lua_pushlstring(L, (const char*)output, bytes);
 
 	return 1;
 }
@@ -509,7 +522,7 @@ lunpack(lua_State *L) {
 		if (r < 0)
 			return luaL_error(L, "Invalid unpack stream");
 	}
-	lua_pushlstring(L, output, r);
+	lua_pushlstring(L, (const char*)output, r);
 	return 1;
 }
 
@@ -523,7 +536,7 @@ pushfunction_withbuffer(lua_State *L, const char * name, lua_CFunction func) {
 
 static int
 lprotocol(lua_State *L) {
-	struct sproto * sp = lua_touserdata(L, 1);
+	struct sproto * sp = (struct sproto*)lua_touserdata(L, 1);
 	struct sproto_type * request;
 	struct sproto_type * response;
 	int t;
@@ -571,7 +584,7 @@ static struct sproto * G_sproto[MAX_GLOBALSPROTO];
 
 static int
 lsaveproto(lua_State *L) {
-	struct sproto * sp = lua_touserdata(L, 1);
+	struct sproto * sp = (struct sproto*)lua_touserdata(L, 1);
 	int index = luaL_optinteger(L, 2, 0);
 	if (index < 0 || index >= MAX_GLOBALSPROTO) {
 		return luaL_error(L, "Invalid global slot index %d", index);
@@ -600,7 +613,7 @@ lloadproto(lua_State *L) {
 
 static int
 encode_default(const struct sproto_arg *args) {
-	lua_State *L = args->ud;
+	lua_State *L = (lua_State*)args->ud;
 	lua_pushstring(L, args->tagname);
 	if (args->index > 0) {
 		lua_newtable(L);
@@ -637,7 +650,7 @@ ldefault(lua_State *L) {
 	int ret;
 	// 64 is always enough for dummy buffer, except the type has many fields ( > 27).
 	char dummy[64];
-	struct sproto_type * st = lua_touserdata(L, 1);
+	struct sproto_type * st = (struct sproto_type*)lua_touserdata(L, 1);
 	if (st == NULL) {
 		return luaL_argerror(L, 1, "Need a sproto_type object");
 	}

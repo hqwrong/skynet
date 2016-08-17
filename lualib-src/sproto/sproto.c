@@ -18,6 +18,7 @@ struct field {
 	const char * name;
 	struct sproto_type * st;
 	int key;
+	int decimal;
 };
 
 struct sproto_type {
@@ -71,7 +72,7 @@ pool_release(struct pool *p) {
 
 static void *
 pool_newchunk(struct pool *p, size_t sz) {
-	struct chunk * t = malloc(sz + sizeof(struct chunk));
+	struct chunk * t = (struct chunk*)malloc(sz + sizeof(struct chunk));
 	if (t == NULL)
 		return NULL;
 	t->next = p->header;
@@ -171,10 +172,21 @@ struct_field(const uint8_t * stream, size_t sz) {
 static const char *
 import_string(struct sproto *s, const uint8_t * stream) {
 	uint32_t sz = todword(stream);
-	char * buffer = pool_alloc(&s->memory, sz+1);
+	char * buffer = (char*)pool_alloc(&s->memory, sz+1);
 	memcpy(buffer, stream+SIZEOF_LENGTH, sz);
 	buffer[sz] = '\0';
 	return buffer;
+}
+
+static int
+calc_pow(int base, int n) {
+	if (n == 0)
+		return 1;
+	int r = calc_pow(base * base , n / 2);
+	if (n&1) {
+		r *= base;
+	}
+	return r;
 }
 
 static const uint8_t *
@@ -190,6 +202,7 @@ import_field(struct sproto *s, struct field *f, const uint8_t * stream) {
 	f->name = NULL;
 	f->st = NULL;
 	f->key = -1;
+	f->decimal = 0;
 
 	sz = todword(stream);
 	stream += SIZEOF_LENGTH;
@@ -222,12 +235,16 @@ import_field(struct sproto *s, struct field *f, const uint8_t * stream) {
 			f->type = value;
 			break;
 		case 2: // type index
-			if (value >= s->type_n)
-				return NULL;	// invalid type index
-			if (f->type >= 0)
-				return NULL;
-			f->type = SPROTO_TSTRUCT;
-			f->st = &s->type[value];
+			if (f->type == SPROTO_TINTEGER) {
+				f->decimal = calc_pow(10, value);
+			} else {
+				if (value >= s->type_n)
+					return NULL;	// invalid type index
+				if (f->type >= 0)
+					return NULL;
+				f->type = SPROTO_TSTRUCT;
+				f->st = &s->type[value];
+			}
 			break;
 		case 3: // tag
 			f->tag = value;
@@ -297,7 +314,7 @@ import_type(struct sproto *s, struct sproto_type *t, const uint8_t * stream) {
 	maxn = n;
 	last = -1;
 	t->n = n;
-	t->f = pool_alloc(&s->memory, sizeof(struct field) * n);
+	t->f = (struct field*)pool_alloc(&s->memory, sizeof(struct field) * n);
 	for (i=0;i<n;i++) {
 		int tag;
 		struct field *f = &t->f[i];
@@ -411,11 +428,11 @@ create_from_bundle(struct sproto *s, const uint8_t * stream, size_t sz) {
 		if (i == 0) {
 			typedata = content+SIZEOF_LENGTH;
 			s->type_n = n;
-			s->type = pool_alloc(&s->memory, n * sizeof(*s->type));
+			s->type = (struct sproto_type*)pool_alloc(&s->memory, n * sizeof(*s->type));
 		} else {
 			protocoldata = content+SIZEOF_LENGTH;
 			s->protocol_n = n;
-			s->proto = pool_alloc(&s->memory, n * sizeof(*s->proto));
+			s->proto = (struct protocol*)pool_alloc(&s->memory, n * sizeof(*s->proto));
 		}
 		content += todword(content) + SIZEOF_LENGTH;
 	}
@@ -441,12 +458,12 @@ sproto_create(const void * proto, size_t sz) {
 	struct pool mem;
 	struct sproto * s;
 	pool_init(&mem);
-	s = pool_alloc(&mem, sizeof(*s));
+	s = (struct sproto*)pool_alloc(&mem, sizeof(*s));
 	if (s == NULL)
 		return NULL;
 	memset(s, 0, sizeof(*s));
 	s->memory = mem;
-	if (create_from_bundle(s, proto, sz) == NULL) {
+	if (create_from_bundle(s, (const uint8_t*)proto, sz) == NULL) {
 		pool_release(&s->memory);
 		return NULL;
 	}
@@ -861,7 +878,7 @@ encode_array(sproto_callback cb, struct sproto_arg *args, uint8_t *data, int siz
 int
 sproto_encode(const struct sproto_type *st, void * buffer, int size, sproto_callback cb, void *ud) {
 	struct sproto_arg args;
-	uint8_t * header = buffer;
+	uint8_t * header = (uint8_t*)buffer;
 	uint8_t * data;
 	int header_sz = SIZEOF_HEADER + st->maxn * SIZEOF_FIELD;
 	int i;
@@ -884,6 +901,7 @@ sproto_encode(const struct sproto_type *st, void * buffer, int size, sproto_call
 		args.tagid = f->tag;
 		args.subtype = f->st;
 		args.mainindex = f->key;
+		args.decimal = f->decimal;
 		if (type & SPROTO_TARRAY) {
 			args.type = type & ~SPROTO_TARRAY;
 			sz = encode_array(cb, &args, data, size);
@@ -1075,7 +1093,7 @@ sproto_decode(const struct sproto_type *st, const void * data, int size, sproto_
 		return -1;
 	// debug print
 	// printf("sproto_decode[%p] (%s)\n", ud, st->name);
-	stream = (void *)data;
+	stream = (uint8_t *)data;
 	fn = toword(stream);
 	stream += SIZEOF_HEADER;
 	size -= SIZEOF_HEADER ;
@@ -1116,6 +1134,7 @@ sproto_decode(const struct sproto_type *st, const void * data, int size, sproto_
 		args.subtype = f->st;
 		args.index = 0;
 		args.mainindex = f->key;
+		args.decimal = f->decimal;
 		if (value < 0) {
 			if (f->type & SPROTO_TARRAY) {
 				if (decode_array(cb, &args, currentdata)) {
@@ -1228,8 +1247,8 @@ sproto_pack(const void * srcv, int srcsz, void * bufferv, int bufsz) {
 	uint8_t * ff_desstart = NULL;
 	int ff_n = 0;
 	int size = 0;
-	const uint8_t * src = srcv;
-	uint8_t * buffer = bufferv;
+	const uint8_t * src = (const uint8_t *)srcv;
+	uint8_t * buffer = (uint8_t*)bufferv;
 	for (i=0;i<srcsz;i+=8) {
 		int n;
 		int padding = i+8 - srcsz;
@@ -1279,8 +1298,8 @@ sproto_pack(const void * srcv, int srcsz, void * bufferv, int bufsz) {
 
 int
 sproto_unpack(const void * srcv, int srcsz, void * bufferv, int bufsz) {
-	const uint8_t * src = srcv;
-	uint8_t * buffer = bufferv;
+	const uint8_t * src = (const uint8_t*)srcv;
+	uint8_t * buffer = (uint8_t*)bufferv;
 	int size = 0;
 	while (srcsz > 0) {
 		uint8_t header = src[0];
