@@ -70,6 +70,9 @@ skynet.start(function()
 					return profile_table
 				end)
 				init = true
+                        elseif command == "name" then
+                                local func = method[4] or function () return SERVICE_NAME end
+                                skynet.ret(skynet.pack(func()))
 			else
 				assert(init, "Never init")
 				assert(command == "exit")
