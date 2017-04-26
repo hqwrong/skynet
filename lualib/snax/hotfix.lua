@@ -25,6 +25,8 @@ local function collect_uv(f , uv, env)
 
 		if uv[name] then
 			assert(uv[name].id == id, string.format("ambiguity local value %s", name))
+                        uv[name].links = uv[name].links or {}
+                        table.insert(uv[name].links, {func = f, index = i, id = id})
 		else
 			uv[name] = { func = f, index = i, id = id }
 
@@ -76,16 +78,24 @@ local function _patch(global, f)
 		local name, value = debug.getupvalue(f, i)
 		if name == nil then
 			break
-		elseif value == nil or value == dummy_env then
-			local old_uv = global[name]
-			if old_uv then
-				debug.upvaluejoin(f, i, old_uv.func, old_uv.index)
-			end
-                else
-                    if type(value) == "function" then
+                end
+                if global[name] then
+                        local old_uv = global[name]
+                        if value == nil or value == dummy_env then
+                                debug.upvaluejoin(f, i, old_uv.func, old_uv.index)
+                        else
+                                debug.upvaluejoin(old_uv.func, old_uv.index, f, i)
+                                if old_uv.links then
+                                        for _,l in ipairs(old_uv.links) do
+                                                debug.upvaluejoin(l.func, l.index, f,i)
+                                        end
+                                end
+                        end
+                end
+
+                if type(value) == "function" then
                         _patch(global, value)
-                    end
-		end
+                end
 		i = i + 1
 	end
 end
