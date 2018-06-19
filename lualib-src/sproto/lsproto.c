@@ -169,7 +169,7 @@ encode(const struct sproto_arg *args) {
 		if (args->decimal) {
 			// It's decimal.
 			lua_Number vn = lua_tonumber(L, -1);
-			v = (lua_Integer)(vn * args->decimal + 0.5);
+			v = (lua_Integer)(vn * args->decimal);
 		} else {
 			v = lua_tointegerx(L, -1, &isnum);
 			if(!isnum) {
