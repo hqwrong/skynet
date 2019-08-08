@@ -67,7 +67,7 @@ local alpha = R"az" + R"AZ" + "_"
 local alnum = alpha + R"09"
 local word = alpha * alnum ^ 0
 local name = C(word)
-local typename = C(word * ("." * word) ^ 0)
+local typename = C((word * ":")^-1 * word * ("." * word) ^ 0)
 local tag = R"09" ^ 1 / tonumber
 local mainkey = "(" * blank0 * name * blank0 * ")"
 local decimal = "(" * blank0 * C(tag) * blank0 * ")"
@@ -92,24 +92,50 @@ local typedef = P {
 
 local proto = blank0 * typedef * blank0
 
+local buildin_types = {
+	integer = 0,
+	boolean = 1,
+	string = 2,
+	binary = 2,	-- binary is a sub type of string
+}
+
+local function nsname(ns, name)
+    if buildin_types[name] then
+        return name
+    end
+    if not ns or name:find(":") then
+        return name
+    end
+    return ns .. ":" .. name
+end
+
 local convert = {}
 
-function convert.protocol(all, obj)
+function convert.protocol(all, obj, ns)
 	local result = { tag = obj[2] }
 	for _, p in ipairs(obj[3]) do
-		assert(result[p[1]] == nil)
+		local pt = p[1]
+		if result[pt] ~= nil then
+			error(string.format("redefine %s in protocol %s", pt, obj[1]))
+		end
 		local typename = p[2]
 		if type(typename) == "table" then
 			local struct = typename
-			typename = obj[1] .. "." .. p[1]
-			all.type[typename] = convert.type(all, { typename, struct })
+			typename = nsname(ns, obj[1] .. "." .. p[1])
+			all.type[typename] = convert.type(all, { typename, struct },ns)
 		end
-		result[p[1]] = typename
+		if typename == "nil" then
+			if p[1] == "response" then
+				result.confirm = true
+			end
+		else
+			result[p[1]] = nsname(ns, typename)
+		end
 	end
 	return result
 end
 
-function convert.type(all, obj)
+function convert.type(all, obj, ns)
 	local result = {}
 	local typename = obj[1]
 	local tags = {}
@@ -142,47 +168,44 @@ function convert.type(all, obj)
 					field.key = mainkey
 				end
 			end
-			field.typename = fieldtype
+			field.typename = nsname(ns,fieldtype)
 		else
 			assert(f.type == "type")	-- nest type
-			local nesttypename = typename .. "." .. f[1]
+			local nesttypename = nsname(ns, typename .. "." .. f[1])
 			f[1] = nesttypename
 			assert(all.type[nesttypename] == nil, "redefined " .. nesttypename)
-			all.type[nesttypename] = convert.type(all, f)
+			all.type[nesttypename] = convert.type(all, f, ns)
 		end
 	end
 	table.sort(result, function(a,b) return a.tag < b.tag end)
 	return result
 end
 
-local function adjust(r)
-	local result = { type = {} , protocol = {} }
-
+local function adjust(r, ns, result)
 	for _, obj in ipairs(r) do
 		local set = result[obj.type]
-		local name = obj[1]
+		local name = nsname(ns, obj[1])
 		assert(set[name] == nil , "redefined " .. name)
-		set[name] = convert[obj.type](result,obj)
+		set[name] = convert[obj.type](result,obj,ns)
 	end
-
-	return result
 end
 
-local buildin_types = {
-	integer = 0,
-	boolean = 1,
-	string = 2,
-}
 
 local function checktype(types, ptype, t)
 	if buildin_types[t] then
 		return t
 	end
-	local fullname = ptype .. "." .. t
+    local nslen = ptype:find(":")
+    local fullname
+    if nslen then
+        fullname = ptype:sub(1,nslen) .. ptype:sub(nslen+1) .. "." .. t:sub(nslen+1)
+    else
+        fullname = ptype .. "." .. t
+    end
 	if types[fullname] then
 		return fullname
 	else
-		ptype = ptype:match "(.+)%..+$"
+        ptype = ptype:match "(.+)%..+$"
 		if ptype then
 			return checktype(types, ptype, t)
 		elseif types[t] then
@@ -232,10 +255,10 @@ local function flattypename(r)
 	return r
 end
 
-local function parser(text,filename)
+local function parser(text,filename,ns,result)
 	local state = { file = filename, pos = 0, line = 1 }
 	local r = lpeg.match(proto * -1 + exception , text , 1, state )
-	return flattypename(check_protocol(adjust(r)))
+	adjust(r,ns,result)
 end
 
 --[[
@@ -258,6 +281,7 @@ end
 	tag	1 :	integer
 	request	2 :	integer	# index
 	response 3 : integer # index
+	confirm 4 : boolean # true means response nil
 }
 
 .group {
@@ -280,8 +304,8 @@ local function packfield(f)
 	table.insert(strtbl, "\0\0")	-- name	(tag = 0, ref an object)
 	if f.buildin then
 		table.insert(strtbl, packvalue(f.buildin))	-- buildin (tag = 1)
-		if f.decimal then
-			table.insert(strtbl, packvalue(f.decimal))	-- f.buildin must be decimal(3)
+		if f.extra then
+			table.insert(strtbl, packvalue(f.extra))	-- f.buildin can be integer or string
 		else
 			table.insert(strtbl, "\1\0")	-- skip (tag = 2)
 		end
@@ -308,9 +332,12 @@ local function packtype(name, t, alltypes)
 		tmp.array = f.array
 		tmp.name = f.name
 		tmp.tag = f.tag
-		tmp.decimal = f.decimal
+		tmp.extra = f.decimal
 
 		tmp.buildin = buildin_types[f.typename]
+		if f.typename == "binary" then
+			tmp.extra = 1	-- binary is sub type of string
+		end
 		local subtype
 		if not tmp.buildin then
 			subtype = assert(alltypes[f.typename])
@@ -362,18 +389,22 @@ local function packproto(name, p, alltypes)
 		"\0\0",	-- name (id=0, ref=0)
 		packvalue(p.tag),	-- tag (tag=1)
 	}
-	if p.request == nil and p.response == nil then
-		tmp[1] = "\2\0"
+	if p.request == nil and p.response == nil and p.confirm == nil then
+		tmp[1] = "\2\0"	-- only two fields
 	else
 		if p.request then
 			table.insert(tmp, packvalue(alltypes[p.request].id)) -- request typename (tag=2)
 		else
-			table.insert(tmp, "\1\0")
+			table.insert(tmp, "\1\0")	-- skip this field (request)
 		end
 		if p.response then
 			table.insert(tmp, packvalue(alltypes[p.response].id)) -- request typename (tag=3)
+		elseif p.confirm then
+			tmp[1] = "\5\0"	-- add confirm field
+			table.insert(tmp, "\1\0")	-- skip this field (response)
+			table.insert(tmp, packvalue(1))	-- confirm = true
 		else
-			tmp[1] = "\3\0"
+			tmp[1] = "\3\0"	-- only three fields
 		end
 	end
 
@@ -465,9 +496,26 @@ function sparser.dump(str)
 end
 
 function sparser.parse(text, name)
-	local r = parser(text, name or "=text")
-	local data = encodeall(r)
-	return data
+	local result = { type = {} , protocol = {} }
+    if type(text) == "string" then
+        parser(text, name or "=text", nil, result)
+    else
+        local hasns
+        for name,txt in pairs(text) do
+            local _,length,namespace = txt:find("^namespace[ \t]+([%w_]+)\n")
+            if length then
+                hasns = true
+                txt = txt:sub(length+1) -- rm namespace declaration
+            end
+            if not length and hasns then
+                error("need namespace declaration in file [%s] like others", name)
+            end
+            parser(txt,name,namespace,result)
+        end
+    end
+
+	local r = flattypename(check_protocol(result))
+    return encodeall(r)
 end
 
 return sparser
