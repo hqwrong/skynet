@@ -67,7 +67,7 @@ local alpha = R"az" + R"AZ" + "_"
 local alnum = alpha + R"09"
 local word = alpha * alnum ^ 0
 local name = C(word)
-local typename = C((word * ":")^-1 * word * ("." * word) ^ 0)
+local typename = C( word * (("." * word) ^ 0) * ("@" * word)^-1)
 local tag = R"09" ^ 1 / tonumber
 local mainkey = "(" * blank0 * name * blank0 * ")"
 local decimal = "(" * blank0 * C(tag) * blank0 * ")"
@@ -103,10 +103,10 @@ local function nsname(ns, name)
     if buildin_types[name] then
         return name
     end
-    if not ns or name:find(":") then
+    if not ns or name:find("@") then
         return name
     end
-    return ns .. ":" .. name
+    return name .. "@" .. ns
 end
 
 local convert = {}
@@ -195,10 +195,10 @@ local function checktype(types, ptype, t)
 	if buildin_types[t] then
 		return t
 	end
-    local nslen = ptype:find(":")
+    local ns = ptype:match("@(.*)")
     local fullname
-    if nslen then
-        fullname = ptype:sub(1,nslen) .. ptype:sub(nslen+1) .. "." .. t:sub(nslen+1)
+    if ns then
+        fullname = ptype:match("(.*)@") .. "." .. t:match("(.*)@") .. "@" .. ns
     else
         fullname = ptype .. "." .. t
     end
